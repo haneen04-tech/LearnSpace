@@ -130,75 +130,75 @@ class DB {
       },
       onCreate: (db, version) async {
         await db.execute('''
-         CREATE TABLE students(
-           id INTEGER PRIMARY KEY AUTOINCREMENT,
-           name TEXT NOT NULL,
-           email TEXT NOT NULL UNIQUE,
-           salt TEXT NOT NULL,
-           password_hash TEXT NOT NULL
-         )
-       ''');
+          CREATE TABLE students(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            email TEXT NOT NULL UNIQUE,
+            salt TEXT NOT NULL,
+            password_hash TEXT NOT NULL
+          )
+        ''');
 
         await db.execute('''
-         CREATE TABLE courses(
-           id INTEGER PRIMARY KEY,
-           title TEXT NOT NULL,
-           category TEXT NOT NULL,
-           description TEXT NOT NULL
-         )
-       ''');
+          CREATE TABLE courses(
+            id INTEGER PRIMARY KEY,
+            title TEXT NOT NULL,
+            category TEXT NOT NULL,
+            description TEXT NOT NULL
+          )
+        ''');
 
         await db.execute('''
-         CREATE TABLE lessons(
-           id INTEGER PRIMARY KEY,
-           course_id INTEGER NOT NULL,
-           title TEXT NOT NULL,
-           content TEXT NOT NULL,
-           FOREIGN KEY(course_id) REFERENCES courses(id)
-         )
-       ''');
+          CREATE TABLE lessons(
+            id INTEGER PRIMARY KEY,
+            course_id INTEGER NOT NULL,
+            title TEXT NOT NULL,
+            content TEXT NOT NULL,
+            FOREIGN KEY(course_id) REFERENCES courses(id)
+          )
+        ''');
 
         await db.execute('''
-         CREATE TABLE enrollments(
-           student_id INTEGER NOT NULL,
-           course_id INTEGER NOT NULL,
-           PRIMARY KEY(student_id, course_id),
-           FOREIGN KEY(student_id) REFERENCES students(id),
-           FOREIGN KEY(course_id) REFERENCES courses(id)
-         )
-       ''');
+          CREATE TABLE enrollments(
+            student_id INTEGER NOT NULL,
+            course_id INTEGER NOT NULL,
+            PRIMARY KEY(student_id, course_id),
+            FOREIGN KEY(student_id) REFERENCES students(id),
+            FOREIGN KEY(course_id) REFERENCES courses(id)
+          )
+        ''');
 
         await db.execute('''
-         CREATE TABLE lesson_progress(
-           student_id INTEGER NOT NULL,
-           lesson_id INTEGER NOT NULL,
-           PRIMARY KEY(student_id, lesson_id),
-           FOREIGN KEY(student_id) REFERENCES students(id),
-           FOREIGN KEY(lesson_id) REFERENCES lessons(id)
-         )
-       ''');
+          CREATE TABLE lesson_progress(
+            student_id INTEGER NOT NULL,
+            lesson_id INTEGER NOT NULL,
+            PRIMARY KEY(student_id, lesson_id),
+            FOREIGN KEY(student_id) REFERENCES students(id),
+            FOREIGN KEY(lesson_id) REFERENCES lessons(id)
+          )
+        ''');
 
         await db.execute('''
-         CREATE TABLE assignments(
-           id INTEGER PRIMARY KEY,
-           course_id INTEGER NOT NULL,
-           title TEXT NOT NULL,
-           due_date TEXT NOT NULL,
-           FOREIGN KEY(course_id) REFERENCES courses(id)
-         )
-       ''');
+          CREATE TABLE assignments(
+            id INTEGER PRIMARY KEY,
+            course_id INTEGER NOT NULL,
+            title TEXT NOT NULL,
+            due_date TEXT NOT NULL,
+            FOREIGN KEY(course_id) REFERENCES courses(id)
+          )
+        ''');
 
         await db.execute('''
-         CREATE TABLE submissions(
-           student_id INTEGER NOT NULL,
-           assignment_id INTEGER NOT NULL,
-           answer TEXT NOT NULL,
-           submitted_at TEXT NOT NULL,
-           PRIMARY KEY(student_id, assignment_id),
-           FOREIGN KEY(student_id) REFERENCES students(id),
-           FOREIGN KEY(assignment_id) REFERENCES assignments(id)
-         )
-       ''');
+          CREATE TABLE submissions(
+            student_id INTEGER NOT NULL,
+            assignment_id INTEGER NOT NULL,
+            answer TEXT NOT NULL,
+            submitted_at TEXT NOT NULL,
+            PRIMARY KEY(student_id, assignment_id),
+            FOREIGN KEY(student_id) REFERENCES students(id),
+            FOREIGN KEY(assignment_id) REFERENCES assignments(id)
+          )
+        ''');
 
         await seed(db);
       },
@@ -341,19 +341,19 @@ class DB {
     final db = await database;
     return db.rawQuery(
       '''
-     SELECT c.*,
-       CASE WHEN e.student_id IS NULL THEN 0 ELSE 1 END AS enrolled,
-       (SELECT COUNT(*) FROM lessons l
-        WHERE l.course_id = c.id) AS total,
-       (SELECT COUNT(*) FROM lesson_progress lp
-        JOIN lessons l ON l.id = lp.lesson_id
-        WHERE lp.student_id = ? AND l.course_id = c.id) AS completed
-     FROM courses c
-     LEFT JOIN enrollments e
-       ON e.course_id = c.id AND e.student_id = ?
-     ${onlyEnrolled ? 'WHERE e.student_id IS NOT NULL' : ''}
-     ORDER BY c.id
-   ''',
+      SELECT c.*,
+        CASE WHEN e.student_id IS NULL THEN 0 ELSE 1 END AS enrolled,
+        (SELECT COUNT(*) FROM lessons l
+         WHERE l.course_id = c.id) AS total,
+        (SELECT COUNT(*) FROM lesson_progress lp
+         JOIN lessons l ON l.id = lp.lesson_id
+         WHERE lp.student_id = ? AND l.course_id = c.id) AS completed
+      FROM courses c
+      LEFT JOIN enrollments e
+        ON e.course_id = c.id AND e.student_id = ?
+      ${onlyEnrolled ? 'WHERE e.student_id IS NOT NULL' : ''}
+      ORDER BY c.id
+    ''',
       [userId, userId],
     );
   }
@@ -366,18 +366,49 @@ class DB {
     }, conflictAlgorithm: ConflictAlgorithm.ignore);
   }
 
+  // Remove an enrollment and course-specific progress and submissions.
+  // This is the DELETE operation for the course enrollment feature.
+  Future<void> unenroll(int userId, int courseId) async {
+    final db = await database;
+    await db.transaction((txn) async {
+      await txn.rawDelete(
+        '''
+        DELETE FROM lesson_progress
+        WHERE student_id = ? AND lesson_id IN (
+          SELECT id FROM lessons WHERE course_id = ?
+        )
+      ''',
+        [userId, courseId],
+      );
+      await txn.rawDelete(
+        '''
+        DELETE FROM submissions
+        WHERE student_id = ? AND assignment_id IN (
+          SELECT id FROM assignments WHERE course_id = ?
+        )
+      ''',
+        [userId, courseId],
+      );
+      await txn.delete(
+        'enrollments',
+        where: 'student_id = ? AND course_id = ?',
+        whereArgs: [userId, courseId],
+      );
+    });
+  }
+
   Future<List<Map<String, Object?>>> lessons(int userId, int courseId) async {
     final db = await database;
     return db.rawQuery(
       '''
-     SELECT l.*,
-       CASE WHEN lp.lesson_id IS NULL THEN 0 ELSE 1 END AS completed
-     FROM lessons l
-     LEFT JOIN lesson_progress lp
-       ON lp.lesson_id = l.id AND lp.student_id = ?
-     WHERE l.course_id = ?
-     ORDER BY l.id
-   ''',
+      SELECT l.*,
+        CASE WHEN lp.lesson_id IS NULL THEN 0 ELSE 1 END AS completed
+      FROM lessons l
+      LEFT JOIN lesson_progress lp
+        ON lp.lesson_id = l.id AND lp.student_id = ?
+      WHERE l.course_id = ?
+      ORDER BY l.id
+    ''',
       [userId, courseId],
     );
   }
@@ -402,16 +433,16 @@ class DB {
     final db = await database;
     return db.rawQuery(
       '''
-     SELECT a.*, c.title AS course_title,
-       s.answer, s.submitted_at
-     FROM assignments a
-     JOIN courses c ON c.id = a.course_id
-     JOIN enrollments e
-       ON e.course_id = a.course_id AND e.student_id = ?
-     LEFT JOIN submissions s
-       ON s.assignment_id = a.id AND s.student_id = ?
-     ORDER BY a.due_date
-   ''',
+      SELECT a.*, c.title AS course_title,
+        s.answer, s.submitted_at
+      FROM assignments a
+      JOIN courses c ON c.id = a.course_id
+      JOIN enrollments e
+        ON e.course_id = a.course_id AND e.student_id = ?
+      LEFT JOIN submissions s
+        ON s.assignment_id = a.id AND s.student_id = ?
+      ORDER BY a.due_date
+    ''',
       [userId, userId],
     );
   }
@@ -496,6 +527,13 @@ double courseProgress(Map<String, Object?> course) {
   final total = course['total'] as int;
   final done = course['completed'] as int;
   return total == 0 ? 0 : done / total;
+}
+
+bool isCourseComplete(Map<String, Object?> course) {
+  final total = course['total'] as int;
+  return course['enrolled'] == 1 &&
+      total > 0 &&
+      (course['completed'] as int) == total;
 }
 
 // ==========================================
@@ -805,6 +843,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
         );
         final percentage = total == 0 ? 0 : completed * 100 ~/ total;
         final pending = tasks.where((a) => a['answer'] == null).length;
+        final completedCourses = courses.where(isCourseComplete).length;
+        final inProgress = courses.where((c) => !isCourseComplete(c)).toList();
         final firstName = (user?['name'] ?? 'Student')
             .toString()
             .split(' ')
@@ -908,21 +948,43 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 ),
               ],
             ),
+            const SizedBox(height: 14),
+            panel(
+              Row(
+                children: [
+                  const Icon(Icons.verified, color: C.green),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      'Courses completed: $completedCourses',
+                      style: const TextStyle(
+                        fontWeight: FontWeight.bold,
+                        color: C.navy,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
             const SizedBox(height: 26),
             heading('Continue learning'),
-            if (courses.isEmpty)
+            if (inProgress.isEmpty)
               panel(
                 Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Text('Your learning journey starts here.'),
+                    Text(
+                      completedCourses > 0
+                          ? 'You are all caught up! Check Completed courses.'
+                          : 'Your learning journey starts here.',
+                    ),
                     const SizedBox(height: 14),
                     primaryButton('Explore courses', widget.onCourses),
                   ],
                 ),
               )
             else
-              ...courses
+              ...inProgress
                   .take(3)
                   .map(
                     (course) => Padding(
@@ -1012,6 +1074,17 @@ class CourseTile extends StatelessWidget {
             Text(course['description'].toString()),
             if (enrolled) ...[
               const SizedBox(height: 14),
+              if (isCourseComplete(course))
+                const Padding(
+                  padding: EdgeInsets.only(bottom: 8),
+                  child: Text(
+                    '✓ Course Completed',
+                    style: TextStyle(
+                      color: C.green,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
               progressBar(percent / 100),
               const SizedBox(height: 6),
               Text(
@@ -1042,60 +1115,94 @@ class CoursesScreen extends StatefulWidget {
 
 class _CoursesScreenState extends State<CoursesScreen> {
   String search = '';
-  bool onlyMine = false;
+  int filter = 0; // 0 All, 1 My Learning, 2 Completed
 
   @override
   Widget build(BuildContext context) {
     return FutureBuilder<List<Map<String, Object?>>>(
-      future: DB.instance.courses(widget.userId, onlyEnrolled: onlyMine),
+      future: DB.instance.courses(widget.userId),
       builder: (context, snapshot) {
-        final courses = snapshot.data ?? [];
-        final filtered = courses
-            .where(
-              (c) => c['title'].toString().toLowerCase().contains(
-                search.toLowerCase(),
-              ),
-            )
-            .toList();
+        if (snapshot.hasError) {
+          return Center(
+            child: Text('Could not load courses: ${snapshot.error}'),
+          );
+        }
+        final allCourses = snapshot.data ?? [];
+        final completeCount = allCourses.where(isCourseComplete).length;
+        final filtered = allCourses.where((course) {
+          final matchesSearch = course['title']
+              .toString()
+              .toLowerCase()
+              .contains(search.toLowerCase());
+          if (!matchesSearch) return false;
+          if (filter == 1) {
+            return course['enrolled'] == 1 && !isCourseComplete(course);
+          }
+          if (filter == 2) return isCourseComplete(course);
+          return true;
+        }).toList();
 
         return ListView(
           padding: const EdgeInsets.all(22),
           children: [
             heading('Explore courses'),
-            const Text('Discover something worth learning.'),
-            const SizedBox(height: 20),
+            Text(
+              '$completeCount course${completeCount == 1 ? '' : 's'} completed',
+            ),
+            const SizedBox(height: 16),
             TextField(
-              onChanged: (s) => setState(() => search = s),
+              onChanged: (value) => setState(() => search = value),
               decoration: const InputDecoration(
                 hintText: 'Search courses',
                 prefixIcon: Icon(Icons.search),
               ),
             ),
-            const SizedBox(height: 12),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: const Text('My enrolled courses'),
-              value: onlyMine,
-              onChanged: (v) => setState(() => onlyMine = v),
+            const SizedBox(height: 14),
+            Wrap(
+              spacing: 8,
+              runSpacing: 6,
+              children: [
+                ChoiceChip(
+                  label: const Text('All Courses'),
+                  selected: filter == 0,
+                  onSelected: (_) => setState(() => filter = 0),
+                ),
+                ChoiceChip(
+                  label: const Text('My Learning'),
+                  selected: filter == 1,
+                  onSelected: (_) => setState(() => filter = 1),
+                ),
+                ChoiceChip(
+                  label: Text('Completed ($completeCount)'),
+                  selected: filter == 2,
+                  onSelected: (_) => setState(() => filter = 2),
+                ),
+              ],
             ),
-            const SizedBox(height: 12),
+            const SizedBox(height: 16),
             if (!snapshot.hasData)
               const Center(child: CircularProgressIndicator())
             else if (filtered.isEmpty)
-              panel(const Text('No courses found.'))
+              panel(
+                Text(
+                  filter == 2
+                      ? 'No completed courses yet. Complete every lesson in a course!'
+                      : 'No courses found.',
+                ),
+              )
             else
               ...filtered.map(
-                (c) => Padding(
+                (course) => Padding(
                   padding: const EdgeInsets.only(bottom: 14),
                   child: CourseTile(
-                    course: c,
+                    course: course,
                     onTap: () async {
                       await Navigator.push(
                         context,
                         MaterialPageRoute(
                           builder: (_) => CourseDetailScreen(
                             userId: widget.userId,
-                            course: c,
+                            course: course,
                           ),
                         ),
                       );
@@ -1153,6 +1260,37 @@ class _CourseDetailScreenState extends State<CourseDetailScreen> {
     showMessage(context, 'Successfully enrolled!');
   }
 
+  Future<void> confirmUnenroll() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Unenroll from course?'),
+        content: const Text(
+          'This will remove the course from My Learning and delete your '
+          'saved lesson progress and assignment submissions for this course.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Unenroll'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    try {
+      await DB.instance.unenroll(widget.userId, widget.course['id'] as int);
+      if (!mounted) return;
+      Navigator.pop(context);
+    } catch (_) {
+      if (mounted) showMessage(context, 'Could not unenroll. Try again.');
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -1197,48 +1335,71 @@ class _CourseDetailScreenState extends State<CourseDetailScreen> {
                 }
 
                 final lessons = snapshot.data!;
+                final allDone =
+                    lessons.isNotEmpty &&
+                    lessons.every((lesson) => lesson['completed'] == 1);
 
                 return Column(
-                  children: lessons.asMap().entries.map((entry) {
-                    final lesson = entry.value;
-                    final done = lesson['completed'] == 1;
-
-                    return Padding(
-                      padding: const EdgeInsets.only(bottom: 10),
-                      child: panel(
-                        ListTile(
-                          contentPadding: EdgeInsets.zero,
-                          leading: CircleAvatar(
-                            backgroundColor: done ? C.green : C.ivory,
-                            child: Icon(
-                              done ? Icons.check : Icons.play_arrow,
-                              color: done ? Colors.white : C.navy,
-                            ),
+                  children: [
+                    if (allDone)
+                      panel(
+                        const Text(
+                          '🎉 Course completed! You can find it under Completed.',
+                          style: TextStyle(
+                            fontWeight: FontWeight.bold,
+                            color: C.navy,
                           ),
-                          title: Text(lesson['title'].toString()),
-                          subtitle: Text('Lesson ${entry.key + 1}'),
-                          trailing: const Icon(Icons.chevron_right),
-                          onTap: () async {
-                            await Navigator.push(
-                              context,
-                              MaterialPageRoute(
-                                builder: (_) => LessonScreen(
-                                  userId: widget.userId,
-                                  lesson: lesson,
-                                ),
-                              ),
-                            );
-
-                            if (mounted) {
-                              setState(() {});
-                            }
-                          },
                         ),
+                        color: C.sand,
                       ),
-                    );
-                  }).toList(),
+                    ...lessons.asMap().entries.map((entry) {
+                      final lesson = entry.value;
+                      final done = lesson['completed'] == 1;
+
+                      return Padding(
+                        padding: const EdgeInsets.only(bottom: 10),
+                        child: panel(
+                          ListTile(
+                            contentPadding: EdgeInsets.zero,
+                            leading: CircleAvatar(
+                              backgroundColor: done ? C.green : C.ivory,
+                              child: Icon(
+                                done ? Icons.check : Icons.play_arrow,
+                                color: done ? Colors.white : C.navy,
+                              ),
+                            ),
+                            title: Text(lesson['title'].toString()),
+                            subtitle: Text('Lesson ${entry.key + 1}'),
+                            trailing: const Icon(Icons.chevron_right),
+                            onTap: () async {
+                              await Navigator.push(
+                                context,
+                                MaterialPageRoute(
+                                  builder: (_) => LessonScreen(
+                                    userId: widget.userId,
+                                    lesson: lesson,
+                                  ),
+                                ),
+                              );
+
+                              if (mounted) {
+                                setState(() {});
+                              }
+                            },
+                          ),
+                        ),
+                      );
+                    }),
+                  ],
                 );
               },
+            ),
+            const SizedBox(height: 24),
+            OutlinedButton.icon(
+              onPressed: confirmUnenroll,
+              icon: const Icon(Icons.person_remove_outlined),
+              label: const Text('Unenroll from this course'),
+              style: OutlinedButton.styleFrom(foregroundColor: C.orange),
             ),
           ],
         ],
@@ -1473,6 +1634,7 @@ class ProfileScreen extends StatelessWidget {
           (s, c) => s + (c['completed'] as int),
         );
         final submitted = tasks.where((a) => a['answer'] != null).length;
+        final completeCount = courses.where(isCourseComplete).length;
 
         return ListView(
           padding: const EdgeInsets.all(22),
@@ -1515,6 +1677,12 @@ class ProfileScreen extends StatelessWidget {
                     leading: const Icon(Icons.task_alt, color: C.green),
                     title: const Text('Completed lessons'),
                     trailing: Text('$completed'),
+                  ),
+                  const Divider(),
+                  ListTile(
+                    leading: const Icon(Icons.verified, color: C.green),
+                    title: const Text('Completed courses'),
+                    trailing: Text('$completeCount'),
                   ),
                   const Divider(),
                   ListTile(
